@@ -1,0 +1,6 @@
+{
+  "name": "روابطي — مركز الروابط الشخصية والإحصائيات",
+  "description": "صفحة عصرية سريعة التحميل لروابط التواصل الاجتماعي مع أيقونات تفاعلية ولوحة تحكم محمية بكلمة مرور مشفرة وإحصائيات دقيقة للنقرات.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
