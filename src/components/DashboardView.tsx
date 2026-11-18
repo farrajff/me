@@ -42,6 +42,17 @@ import {
 } from '../shared/types';
 import { PublicProfileView } from './PublicProfileView';
 import { PLATFORM_LIST, PLATFORM_MAP, SocialIcon } from './SocialIcons';
+import {
+  changePassword as changePasswordApi,
+  deleteLinkItem,
+  fetchAdminDashboard,
+  getAppMode,
+  patchLinkItem,
+  reorderLinkItems,
+  resetAnalyticsData,
+  saveLinkItem,
+  saveProfileAndAppearance,
+} from '../services/dataClient';
 
 type DashboardTab = 'links' | 'appearance' | 'analytics' | 'security';
 
@@ -168,32 +179,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     setTimeout(() => setToast(''), 2600);
   };
 
-  const authHeaders = useMemo(
-    () => ({
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
-    }),
-    [token],
-  );
-
   const fetchDashboard = useCallback(async () => {
     try {
       setError('');
-      const res = await fetch('/api/admin/dashboard', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (res.status === 401) {
-        onLogout();
-        return;
-      }
-      if (!res.ok) {
-        throw new Error('تعذر تحميل بيانات لوحة التحكم.');
-      }
-      const payload = (await res.json()) as AdminDashboardPayload;
+      const payload = await fetchAdminDashboard(token);
       setData(payload);
       setDraftProfile(payload.profile);
       setDraftAppearance(payload.appearance);
     } catch (err) {
+      if (err instanceof Error && err.message === 'UNAUTHORIZED') {
+        onLogout();
+        return;
+      }
       setError(err instanceof Error ? err.message : 'حدث خطأ غير متوقع.');
     } finally {
       setLoading(false);
@@ -251,34 +248,23 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
     setSavingLink(true);
     try {
-      const url = editingLink ? `/api/admin/links/${editingLink.id}` : '/api/admin/links';
-      const method = editingLink ? 'PUT' : 'POST';
-      const res = await fetch(url, {
-        method,
-        headers: authHeaders,
-        body: JSON.stringify({
-          platform: formPlatform,
-          title: formTitle.trim(),
-          subtitle: formSubtitle.trim(),
-          url: formUrl.trim(),
-          featured: formFeatured,
-        }),
+      await saveLinkItem(token, editingLink ? editingLink.id : null, {
+        platform: formPlatform,
+        title: formTitle.trim(),
+        subtitle: formSubtitle.trim(),
+        url: formUrl.trim(),
+        featured: formFeatured,
       });
-      const body = (await res.json()) as { error?: string };
-      if (res.status === 401) {
-        onLogout();
-        return;
-      }
-      if (!res.ok) {
-        setLinkFormError(body.error || 'تعذر حفظ الرابط.');
-        return;
-      }
       setLinkModalOpen(false);
       await fetchDashboard();
       onPublicDataChanged();
       showToast(editingLink ? 'تم تحديث الرابط بنجاح.' : 'تمت إضافة الرابط بنجاح.');
-    } catch {
-      setLinkFormError('حدث خطأ في الاتصال بالخادم.');
+    } catch (err) {
+      if (err instanceof Error && err.message === 'UNAUTHORIZED') {
+        onLogout();
+        return;
+      }
+      setLinkFormError(err instanceof Error ? err.message : 'تعذر حفظ الرابط.');
     } finally {
       setSavingLink(false);
     }
@@ -286,41 +272,21 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   const handleToggleActive = async (link: SocialLink) => {
     try {
-      const res = await fetch(`/api/admin/links/${link.id}`, {
-        method: 'PUT',
-        headers: authHeaders,
-        body: JSON.stringify({ isActive: !link.isActive }),
-      });
-      if (res.status === 401) {
-        onLogout();
-        return;
-      }
-      if (res.ok) {
-        await fetchDashboard();
-        onPublicDataChanged();
-      }
-    } catch {
-      // Ignore transient network errors
+      await patchLinkItem(token, link.id, { isActive: !link.isActive });
+      await fetchDashboard();
+      onPublicDataChanged();
+    } catch (err) {
+      if (err instanceof Error && err.message === 'UNAUTHORIZED') onLogout();
     }
   };
 
   const handleToggleFeatured = async (link: SocialLink) => {
     try {
-      const res = await fetch(`/api/admin/links/${link.id}`, {
-        method: 'PUT',
-        headers: authHeaders,
-        body: JSON.stringify({ featured: !link.featured }),
-      });
-      if (res.status === 401) {
-        onLogout();
-        return;
-      }
-      if (res.ok) {
-        await fetchDashboard();
-        onPublicDataChanged();
-      }
-    } catch {
-      // Ignore
+      await patchLinkItem(token, link.id, { featured: !link.featured });
+      await fetchDashboard();
+      onPublicDataChanged();
+    } catch (err) {
+      if (err instanceof Error && err.message === 'UNAUTHORIZED') onLogout();
     }
   };
 
@@ -335,45 +301,38 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
     setData({ ...data, links: reordered });
     try {
-      const res = await fetch('/api/admin/links-order', {
-        method: 'PUT',
-        headers: authHeaders,
-        body: JSON.stringify({ orderedIds: reordered.map((item) => item.id) }),
-      });
-      if (res.status === 401) {
+      await reorderLinkItems(
+        token,
+        reordered.map((item) => item.id),
+      );
+      onPublicDataChanged();
+    } catch (err) {
+      if (err instanceof Error && err.message === 'UNAUTHORIZED') {
         onLogout();
         return;
       }
-      onPublicDataChanged();
-    } catch {
       await fetchDashboard();
     }
   };
 
   const handleDeleteLink = async (id: string) => {
     try {
-      const res = await fetch(`/api/admin/links/${id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (res.status === 401) {
-        onLogout();
-        return;
-      }
-      if (res.ok) {
-        setDeleteConfirmId(null);
-        await fetchDashboard();
-        onPublicDataChanged();
-        showToast('تم حذف الرابط.');
-      }
-    } catch {
-      // Ignore
+      await deleteLinkItem(token, id);
+      setDeleteConfirmId(null);
+      await fetchDashboard();
+      onPublicDataChanged();
+      showToast('تم حذف الرابط.');
+    } catch (err) {
+      if (err instanceof Error && err.message === 'UNAUTHORIZED') onLogout();
     }
   };
 
   const handleCopyTrackingUrl = async (id: string) => {
     try {
-      await navigator.clipboard.writeText(`${window.location.origin}/r/${id}`);
+      const base = window.location.href.split('#')[0].replace(/\/$/, '');
+      const targetUrl =
+        getAppMode() === 'server' ? `${base}/r/${id}` : data?.links.find((l) => l.id === id)?.url || '';
+      await navigator.clipboard.writeText(targetUrl);
       setCopiedTrackingId(id);
       setTimeout(() => setCopiedTrackingId(null), 1800);
     } catch {
@@ -386,27 +345,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     if (!draftProfile || !draftAppearance) return;
     setSavingAppearance(true);
     try {
-      const [profRes, appRes] = await Promise.all([
-        fetch('/api/admin/profile', {
-          method: 'PUT',
-          headers: authHeaders,
-          body: JSON.stringify(draftProfile),
-        }),
-        fetch('/api/admin/appearance', {
-          method: 'PUT',
-          headers: authHeaders,
-          body: JSON.stringify(draftAppearance),
-        }),
-      ]);
-      if (profRes.status === 401 || appRes.status === 401) {
+      await saveProfileAndAppearance(token, draftProfile, draftAppearance);
+      await fetchDashboard();
+      onPublicDataChanged();
+      showToast('تم حفظ المظهر وبيانات الملف بنجاح.');
+    } catch (err) {
+      if (err instanceof Error && err.message === 'UNAUTHORIZED') {
         onLogout();
         return;
       }
-      if (profRes.ok && appRes.ok) {
-        await fetchDashboard();
-        onPublicDataChanged();
-        showToast('تم حفظ المظهر وبيانات الملف بنجاح.');
-      }
+      showToast('تعذر حفظ التغييرات.');
     } finally {
       setSavingAppearance(false);
     }
@@ -429,21 +377,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   // --- Analytics Reset ---
   const handleResetAnalytics = async () => {
     try {
-      const res = await fetch('/api/admin/analytics/reset', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (res.status === 401) {
-        onLogout();
-        return;
-      }
-      if (res.ok) {
-        setConfirmResetStats(false);
-        await fetchDashboard();
-        showToast('تم تصفير جميع إحصائيات النقرات.');
-      }
-    } catch {
-      // Ignore
+      await resetAnalyticsData(token);
+      setConfirmResetStats(false);
+      await fetchDashboard();
+      showToast('تم تصفير جميع إحصائيات النقرات.');
+    } catch (err) {
+      if (err instanceof Error && err.message === 'UNAUTHORIZED') onLogout();
     }
   };
 
@@ -461,25 +400,17 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     }
     setSavingPassword(true);
     try {
-      const res = await fetch('/api/auth/change-password', {
-        method: 'POST',
-        headers: authHeaders,
-        body: JSON.stringify({ currentPassword, newPassword: newPassword.trim() }),
-      });
-      const body = (await res.json()) as { error?: string; token?: string };
-      if (!res.ok) {
-        setPasswordStatus({ type: 'err', msg: body.error || 'تعذر تحديث كلمة المرور.' });
-        return;
-      }
-      if (body.token) {
-        onTokenUpdated(body.token);
-      }
+      const newToken = await changePasswordApi(token, currentPassword, newPassword.trim());
+      onTokenUpdated(newToken);
       setCurrentPassword('');
       setNewPassword('');
       setConfirmNewPassword('');
       setPasswordStatus({ type: 'ok', msg: 'تم تحديث كلمة المرور المشفرة بنجاح.' });
-    } catch {
-      setPasswordStatus({ type: 'err', msg: 'حدث خطأ في الاتصال بالخادم.' });
+    } catch (err) {
+      setPasswordStatus({
+        type: 'err',
+        msg: err instanceof Error ? err.message : 'تعذر تحديث كلمة المرور.',
+      });
     } finally {
       setSavingPassword(false);
     }

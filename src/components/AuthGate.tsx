@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { ArrowRight, Eye, EyeOff, KeyRound, Lock, ShieldCheck } from 'lucide-react';
+import { loginWithPassword, setupPassword } from '../services/dataClient';
 
 interface AuthGateProps {
   isConfigured: boolean;
@@ -34,20 +35,12 @@ export const AuthGate: React.FC<AuthGateProps> = ({
 
     setLoading(true);
     try {
-      const endpoint = isConfigured ? '/api/auth/login' : '/api/auth/setup';
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password }),
-      });
-      const data = (await res.json()) as { token?: string; error?: string };
-      if (!res.ok || !data.token) {
-        setError(data.error || 'تعذر التحقق من كلمة المرور.');
-        return;
-      }
-      onAuthenticated(data.token);
-    } catch {
-      setError('حدث خطأ في الاتصال بالخادم.');
+      const token = isConfigured
+        ? await loginWithPassword(password)
+        : await setupPassword(password);
+      onAuthenticated(token);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'حدث خطأ غير متوقع.');
     } finally {
       setLoading(false);
     }

@@ -1,5 +1,7 @@
-import React, { Suspense, lazy, useCallback, useEffect, useState } from 'react';
+import React, { Component, Suspense, lazy, useCallback, useEffect, useState } from 'react';
 import type { PublicPayload, SocialLink } from './shared/types';
+import { createDefaultPublicPayload } from './shared/defaultData';
+import { fetchAuthStatus, fetchPublicData, trackLinkClick } from './services/dataClient';
 import { PublicProfileView } from './components/PublicProfileView';
 import { AuthGate } from './components/AuthGate';
 
@@ -10,33 +12,79 @@ const DashboardView = lazy(() =>
 const CACHE_KEY = 'rawabiti_public_cache_v1';
 const TOKEN_KEY = 'rawabiti_admin_token';
 
-function readCachedPublic(): PublicPayload | null {
+function readCachedPublic(): PublicPayload {
   try {
     const raw = localStorage.getItem(CACHE_KEY);
-    return raw ? (JSON.parse(raw) as PublicPayload) : null;
+    if (raw) {
+      const parsed = JSON.parse(raw) as PublicPayload;
+      if (parsed?.profile && Array.isArray(parsed?.links)) {
+        return parsed;
+      }
+    }
   } catch {
-    return null;
+    // Fallback to default below
+  }
+  return createDefaultPublicPayload();
+}
+
+function isAdminLocation(): boolean {
+  return (
+    window.location.hash === '#/admin' ||
+    window.location.pathname === '/admin' ||
+    window.location.pathname.endsWith('/admin')
+  );
+}
+
+class AppErrorBoundary extends Component<
+  { children: React.ReactNode },
+  { hasError: boolean }
+> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false };
+  }
+
+  static getDerivedStateFromError(): { hasError: boolean } {
+    return { hasError: true };
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="min-h-screen bg-[#F8F7F4] text-[#111315] flex items-center justify-center p-6 text-center">
+          <div className="max-w-md bg-white border border-slate-200 rounded-2xl p-6 space-y-4">
+            <h1 className="text-lg font-bold">تعذر عرض الصفحة</h1>
+            <p className="text-sm text-slate-600">حدث خطأ غير متوقع. اضغط لإعادة تحميل الصفحة.</p>
+            <button
+              type="button"
+              onClick={() => window.location.reload()}
+              className="px-4 py-2 text-xs font-semibold text-white bg-blue-700 rounded-xl cursor-pointer"
+            >
+              إعادة التحميل
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
   }
 }
 
-export default function App() {
+function AppContent() {
   const [view, setView] = useState<'public' | 'admin'>(() =>
-    window.location.pathname === '/admin' ? 'admin' : 'public',
+    isAdminLocation() ? 'admin' : 'public',
   );
-  const [publicData, setPublicData] = useState<PublicPayload | null>(() => readCachedPublic());
+  const [publicData, setPublicData] = useState<PublicPayload>(() => readCachedPublic());
   const [authStatus, setAuthStatus] = useState<{
     checked: boolean;
     isConfigured: boolean;
     authenticated: boolean;
-  }>({ checked: false, isConfigured: true, authenticated: false });
+  }>({ checked: false, isConfigured: false, authenticated: false });
   const [token, setToken] = useState<string>(() => localStorage.getItem(TOKEN_KEY) || '');
 
   const loadPublicData = useCallback(async (trackView = false) => {
     try {
-      const url = trackView ? '/api/public?trackView=1' : '/api/public';
-      const res = await fetch(url);
-      if (!res.ok) return;
-      const payload = (await res.json()) as PublicPayload;
+      const payload = await fetchPublicData(trackView);
       setPublicData(payload);
       try {
         localStorage.setItem(CACHE_KEY, JSON.stringify(payload));
@@ -44,17 +92,13 @@ export default function App() {
         // Ignore storage quota errors
       }
     } catch {
-      // Keep cached data if offline
+      // Keep current rendered data
     }
   }, []);
 
   const checkAuthStatus = useCallback(async (currentToken: string) => {
     try {
-      const res = await fetch('/api/auth/status', {
-        headers: currentToken ? { Authorization: `Bearer ${currentToken}` } : {},
-      });
-      if (!res.ok) return;
-      const status = (await res.json()) as { isConfigured: boolean; authenticated: boolean };
+      const status = await fetchAuthStatus(currentToken);
       setAuthStatus({
         checked: true,
         isConfigured: status.isConfigured,
@@ -65,12 +109,12 @@ export default function App() {
         setToken('');
       }
     } catch {
-      setAuthStatus({ checked: true, isConfigured: true, authenticated: false });
+      setAuthStatus({ checked: true, isConfigured: false, authenticated: false });
     }
   }, []);
 
   useEffect(() => {
-    const isInitialPublic = window.location.pathname !== '/admin';
+    const isInitialPublic = !isAdminLocation();
     loadPublicData(isInitialPublic);
   }, [loadPublicData]);
 
@@ -81,28 +125,33 @@ export default function App() {
   }, [view, token, checkAuthStatus]);
 
   useEffect(() => {
-    const onPopState = () => {
-      setView(window.location.pathname === '/admin' ? 'admin' : 'public');
+    const onRouteChange = () => {
+      setView(isAdminLocation() ? 'admin' : 'public');
     };
-    window.addEventListener('popstate', onPopState);
-    return () => window.removeEventListener('popstate', onPopState);
+    window.addEventListener('popstate', onRouteChange);
+    window.addEventListener('hashchange', onRouteChange);
+    return () => {
+      window.removeEventListener('popstate', onRouteChange);
+      window.removeEventListener('hashchange', onRouteChange);
+    };
   }, []);
 
   const navigateTo = (target: 'public' | 'admin') => {
-    const path = target === 'admin' ? '/admin' : '/';
-    if (window.location.pathname !== path) {
-      window.history.pushState({}, '', path);
+    if (target === 'admin') {
+      window.location.hash = '#/admin';
+    } else {
+      if (window.location.hash) {
+        window.location.hash = '';
+      }
+      if (window.location.pathname === '/admin') {
+        window.history.pushState({}, '', '/');
+      }
     }
     setView(target);
   };
 
   const handleTrackClick = useCallback((link: SocialLink) => {
-    const endpoint = `/api/links/${encodeURIComponent(link.id)}/click`;
-    if (typeof navigator.sendBeacon === 'function') {
-      navigator.sendBeacon(endpoint, '');
-    } else {
-      fetch(endpoint, { method: 'POST', keepalive: true }).catch(() => {});
-    }
+    trackLinkClick(link.id);
   }, []);
 
   const handleAuthenticated = (newToken: string) => {
@@ -161,19 +210,6 @@ export default function App() {
     );
   }
 
-  if (!publicData) {
-    return (
-      <div className="min-h-screen bg-[#F8F7F4] flex items-center justify-center p-5">
-        <div className="w-full max-w-2xl space-y-4">
-          <div className="h-64 bg-white border border-slate-200/80 rounded-2xl animate-pulse" />
-          <div className="h-16 bg-white border border-slate-200/80 rounded-2xl animate-pulse" />
-          <div className="h-16 bg-white border border-slate-200/80 rounded-2xl animate-pulse" />
-          <div className="h-16 bg-white border border-slate-200/80 rounded-2xl animate-pulse" />
-        </div>
-      </div>
-    );
-  }
-
   return (
     <PublicProfileView
       profile={publicData.profile}
@@ -182,5 +218,13 @@ export default function App() {
       onTrackClick={handleTrackClick}
       onOpenAdmin={() => navigateTo('admin')}
     />
+  );
+}
+
+export default function App() {
+  return (
+    <AppErrorBoundary>
+      <AppContent />
+    </AppErrorBoundary>
   );
 }

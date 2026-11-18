@@ -16,6 +16,8 @@ import {
   type ProfileData,
   type SocialLink,
 } from '../shared/types';
+import { resolveAssetUrl } from '../shared/defaultAssets';
+import { getAppMode } from '../services/dataClient';
 import { PLATFORM_MAP, SocialIcon } from './SocialIcons';
 
 interface PublicProfileViewProps {
@@ -91,19 +93,24 @@ export const PublicProfileView: React.FC<PublicProfileViewProps> = ({
     onTrackClick(link);
   };
 
+  const pageBaseUrl = window.location.href.split('#')[0].replace(/\/$/, '');
+
   const handleCopyPageUrl = async () => {
-    if (await copyTextSafely(window.location.origin)) {
+    if (await copyTextSafely(pageBaseUrl)) {
       setCopiedPage(true);
       setTimeout(() => setCopiedPage(false), 2000);
     }
   };
 
   const handleCopyShortLink = async (linkId: string) => {
-    if (await copyTextSafely(`${window.location.origin}/r/${linkId}`)) {
+    if (await copyTextSafely(`${pageBaseUrl}/r/${linkId}`)) {
       setCopiedId(linkId);
       setTimeout(() => setCopiedId(null), 1800);
     }
   };
+
+  const resolvedAvatarUrl = resolveAssetUrl(profile.avatarUrl);
+  const resolvedCoverUrl = resolveAssetUrl(profile.coverUrl);
 
   const renderIconBox = (link: SocialLink, isFeatured: boolean) => {
     const platformMeta = PLATFORM_MAP[link.platform] || PLATFORM_MAP.website;
@@ -217,9 +224,9 @@ export const PublicProfileView: React.FC<PublicProfileViewProps> = ({
         >
           {profile.showCover && (
             <div className="relative h-32 sm:h-40 w-full overflow-hidden">
-              {profile.coverUrl && !coverFailed ? (
+              {resolvedCoverUrl && !coverFailed ? (
                 <img
-                  src={profile.coverUrl}
+                  src={resolvedCoverUrl}
                   alt="غلاف الملف الشخصي"
                   referrerPolicy="no-referrer"
                   onError={() => setCoverFailed(true)}
@@ -250,9 +257,9 @@ export const PublicProfileView: React.FC<PublicProfileViewProps> = ({
                   color: accent.onAccent,
                 }}
               >
-                {profile.avatarUrl && !avatarFailed ? (
+                {resolvedAvatarUrl && !avatarFailed ? (
                   <img
-                    src={profile.avatarUrl}
+                    src={resolvedAvatarUrl}
                     alt={profile.displayName}
                     referrerPolicy="no-referrer"
                     onError={() => setAvatarFailed(true)}
@@ -484,7 +491,7 @@ export const PublicProfileView: React.FC<PublicProfileViewProps> = ({
                   }}
                 >
                   <span className="text-xs font-mono truncate px-1" dir="ltr">
-                    {window.location.origin}
+                    {pageBaseUrl}
                   </span>
                   <button
                     type="button"
@@ -502,7 +509,7 @@ export const PublicProfileView: React.FC<PublicProfileViewProps> = ({
                 </div>
               </div>
 
-              {links.length > 0 && (
+              {links.length > 0 && getAppMode() === 'server' && (
                 <div>
                   <p className="text-xs mb-2" style={{ color: theme.textSecondary }}>
                     روابط التتبع المختصرة (تحسب كل نقرة بدقة)
