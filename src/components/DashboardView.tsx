@@ -367,7 +367,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     const file = e.target.files?.[0];
     if (!file || !draftProfile) return;
     try {
-      const resized = await resizeImageFile(file, field === 'avatarUrl' ? 400 : 1200);
+      const resized = await resizeImageFile(file, field === 'avatarUrl' ? 300 : 800);
       setDraftProfile({ ...draftProfile, [field]: resized });
     } catch {
       showToast('تعذر معالجة الصورة المختارة.');

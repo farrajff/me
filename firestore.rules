@@ -1,0 +1,178 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Reusable Hardened Helpers ---
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == 'gate1425@gmail.com' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    // --- Validation Blueprints ---
+    function isValidSitePublicConfig(data) {
+      return data.keys().hasAll([
+        'displayName', 'handle', 'bio', 'location', 'avatarUrl', 'coverUrl',
+        'showCover', 'showQuickIcons', 'theme', 'accentColor', 'cardRadius',
+        'layout', 'iconStyle', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'displayName', 'handle', 'bio', 'location', 'avatarUrl', 'coverUrl',
+        'showCover', 'showQuickIcons', 'theme', 'accentColor', 'cardRadius',
+        'layout', 'iconStyle', 'updatedAt'
+      ]) &&
+      data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80 &&
+      data.handle is string && data.handle.size() <= 60 &&
+      data.bio is string && data.bio.size() <= 260 &&
+      data.location is string && data.location.size() <= 80 &&
+      data.avatarUrl is string && data.avatarUrl.size() <= 150000 &&
+      data.coverUrl is string && data.coverUrl.size() <= 350000 &&
+      data.showCover is bool &&
+      data.showQuickIcons is bool &&
+      data.theme in ['alabaster', 'obsidian', 'sand', 'slate', 'ink'] &&
+      data.accentColor in ['cobalt', 'emerald', 'crimson', 'amber', 'violet', 'charcoal'] &&
+      data.cardRadius in ['sharp', 'soft', 'round'] &&
+      data.layout in ['list', 'grid'] &&
+      data.iconStyle in ['duotone', 'solid', 'minimal'] &&
+      data.updatedAt == request.time;
+    }
+
+    function isValidSiteSecurityConfig(data) {
+      return data.keys().hasAll(['passwordHash', 'updatedAt']) &&
+      data.keys().hasOnly(['passwordHash', 'updatedAt']) &&
+      data.passwordHash is string && data.passwordHash.size() >= 10 && data.passwordHash.size() <= 256 &&
+      data.updatedAt == request.time;
+    }
+
+    function isValidSocialLink(data) {
+      return data.keys().hasAll([
+        'title', 'subtitle', 'url', 'platform', 'isActive', 'featured',
+        'order', 'createdAt', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'title', 'subtitle', 'url', 'platform', 'isActive', 'featured',
+        'order', 'createdAt', 'updatedAt'
+      ]) &&
+      data.title is string && data.title.size() >= 1 && data.title.size() <= 80 &&
+      data.subtitle is string && data.subtitle.size() <= 120 &&
+      data.url is string && data.url.size() >= 3 && data.url.size() <= 512 &&
+      (
+        data.url.matches('^https?://.+') ||
+        data.url.matches('^mailto:.+') ||
+        data.url.matches('^tel:.+')
+      ) &&
+      data.platform in [
+        'x', 'instagram', 'youtube', 'tiktok', 'linkedin', 'github',
+        'telegram', 'whatsapp', 'snapchat', 'behance', 'dribbble',
+        'podcast', 'email', 'website'
+      ] &&
+      data.isActive is bool &&
+      data.featured is bool &&
+      data.order is number && data.order >= 0 && data.order <= 1000 &&
+      data.createdAt is timestamp &&
+      data.updatedAt == request.time;
+    }
+
+    function isValidClickEvent(data) {
+      return data.keys().hasAll(['linkId', 'dateKey', 'device', 'createdAt']) &&
+      data.keys().hasOnly(['linkId', 'dateKey', 'device', 'createdAt']) &&
+      isValidId(data.linkId) &&
+      data.dateKey is string && data.dateKey.size() == 10 && data.dateKey.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$') &&
+      data.device in ['mobile', 'desktop'] &&
+      data.createdAt == request.time;
+    }
+
+    function isValidPageViewEvent(data) {
+      return data.keys().hasAll(['dateKey', 'createdAt']) &&
+      data.keys().hasOnly(['dateKey', 'createdAt']) &&
+      data.dateKey is string && data.dateKey.size() == 10 && data.dateKey.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$') &&
+      data.createdAt == request.time;
+    }
+
+    function isValidAdminUser(data) {
+      return data.keys().hasAll(['email', 'createdAt']) &&
+      data.keys().hasOnly(['email', 'createdAt']) &&
+      data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
+      data.createdAt == request.time;
+    }
+
+    // --- Collection Rules ---
+
+    match /site/public {
+      allow get: if true;
+      allow create, update: if isAdmin() && isValidSitePublicConfig(incoming());
+      allow delete: if false;
+    }
+
+    match /site/security {
+      allow get: if isAdmin();
+      allow create, update: if isAdmin() && isValidSiteSecurityConfig(incoming());
+      allow delete: if false;
+    }
+
+    match /links/{linkId} {
+      allow get: if existing().isActive == true || isAdmin();
+      allow list: if resource.data.isActive == true || isAdmin();
+      allow create: if isValidId(linkId) &&
+        isAdmin() &&
+        isValidSocialLink(incoming()) &&
+        incoming().createdAt == request.time;
+      allow update: if isValidId(linkId) &&
+        isAdmin() &&
+        isValidSocialLink(incoming()) &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'title', 'subtitle', 'url', 'platform', 'isActive', 'featured', 'order', 'updatedAt'
+        ]);
+      allow delete: if isValidId(linkId) && isAdmin();
+    }
+
+    match /clickEvents/{eventId} {
+      allow get, list: if isAdmin();
+      allow create: if isValidId(eventId) &&
+        isValidClickEvent(incoming()) &&
+        exists(/databases/$(database)/documents/links/$(incoming().linkId));
+      allow update: if false;
+      allow delete: if isValidId(eventId) && isAdmin();
+    }
+
+    match /pageViews/{viewId} {
+      allow get, list: if isAdmin();
+      allow create: if isValidId(viewId) && isValidPageViewEvent(incoming());
+      allow update: if false;
+      allow delete: if isValidId(viewId) && isAdmin();
+    }
+
+    match /admins/{userId} {
+      allow get: if isValidId(userId) && (isAdmin() || (isSignedIn() && request.auth.uid == userId));
+      allow list: if isAdmin();
+      allow create, update: if isValidId(userId) && isAdmin() && isValidAdminUser(incoming());
+      allow delete: if isValidId(userId) && isAdmin();
+    }
+
+    match /test/{docId} {
+      allow get: if isValidId(docId);
+    }
+  }
+}

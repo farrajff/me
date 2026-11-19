@@ -1,5 +1,5 @@
 import type { AdminDashboardPayload, PublicPayload } from './types';
-import { DEFAULT_AVATAR_URL, DEFAULT_COVER_URL } from './defaultAssets';
+import { CANONICAL_AVATAR_PATH, CANONICAL_COVER_PATH } from './defaultAssets';
 
 export function createDefaultDashboardData(): AdminDashboardPayload {
   const now = new Date().toISOString();
@@ -9,8 +9,8 @@ export function createDefaultDashboardData(): AdminDashboardPayload {
       handle: '@tariq.studio',
       bio: 'مصمم منتجات رقمية ومهندس واجهات أمامية. أشارك هنا أحدث مشاريعي، مقالاتي التقنية، وقنوات التواصل الرسمية.',
       location: 'الرياض · متاح للاستشارات الإبداعية',
-      avatarUrl: DEFAULT_AVATAR_URL,
-      coverUrl: DEFAULT_COVER_URL,
+      avatarUrl: CANONICAL_AVATAR_PATH,
+      coverUrl: CANONICAL_COVER_PATH,
       showCover: true,
       showQuickIcons: true,
     },

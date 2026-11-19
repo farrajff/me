@@ -1,0 +1,173 @@
+{
+  "entities": {
+    "SitePublicConfig": {
+      "title": "SitePublicConfig",
+      "description": "Public profile metadata and visual appearance settings for the social links page.",
+      "type": "object",
+      "properties": {
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "handle": { "type": "string", "maxLength": 60 },
+        "bio": { "type": "string", "maxLength": 260 },
+        "location": { "type": "string", "maxLength": 80 },
+        "avatarUrl": { "type": "string", "maxLength": 150000 },
+        "coverUrl": { "type": "string", "maxLength": 350000 },
+        "showCover": { "type": "boolean" },
+        "showQuickIcons": { "type": "boolean" },
+        "theme": {
+          "type": "string",
+          "enum": ["alabaster", "obsidian", "sand", "slate", "ink"]
+        },
+        "accentColor": {
+          "type": "string",
+          "enum": ["cobalt", "emerald", "crimson", "amber", "violet", "charcoal"]
+        },
+        "cardRadius": {
+          "type": "string",
+          "enum": ["sharp", "soft", "round"]
+        },
+        "layout": {
+          "type": "string",
+          "enum": ["list", "grid"]
+        },
+        "iconStyle": {
+          "type": "string",
+          "enum": ["duotone", "solid", "minimal"]
+        },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "displayName",
+        "handle",
+        "bio",
+        "location",
+        "avatarUrl",
+        "coverUrl",
+        "showCover",
+        "showQuickIcons",
+        "theme",
+        "accentColor",
+        "cardRadius",
+        "layout",
+        "iconStyle",
+        "updatedAt"
+      ]
+    },
+    "SiteSecurityConfig": {
+      "title": "SiteSecurityConfig",
+      "description": "Encrypted editing password hash stored exclusively for verified administrators.",
+      "type": "object",
+      "properties": {
+        "passwordHash": { "type": "string", "minLength": 10, "maxLength": 256 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["passwordHash", "updatedAt"]
+    },
+    "SocialLink": {
+      "title": "SocialLink",
+      "description": "A social profile or external link displayed on the public page.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "subtitle": { "type": "string", "maxLength": 120 },
+        "url": { "type": "string", "minLength": 3, "maxLength": 512 },
+        "platform": {
+          "type": "string",
+          "enum": [
+            "x",
+            "instagram",
+            "youtube",
+            "tiktok",
+            "linkedin",
+            "github",
+            "telegram",
+            "whatsapp",
+            "snapchat",
+            "behance",
+            "dribbble",
+            "podcast",
+            "email",
+            "website"
+          ]
+        },
+        "isActive": { "type": "boolean" },
+        "featured": { "type": "boolean" },
+        "order": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "title",
+        "subtitle",
+        "url",
+        "platform",
+        "isActive",
+        "featured",
+        "order",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ClickEvent": {
+      "title": "ClickEvent",
+      "description": "Immutable click tracking record generated when a visitor clicks a link.",
+      "type": "object",
+      "properties": {
+        "linkId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "dateKey": { "type": "string", "minLength": 10, "maxLength": 10, "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        "device": { "type": "string", "enum": ["mobile", "desktop"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["linkId", "dateKey", "device", "createdAt"]
+    },
+    "PageViewEvent": {
+      "title": "PageViewEvent",
+      "description": "Immutable page view record generated when a visitor loads the public page.",
+      "type": "object",
+      "properties": {
+        "dateKey": { "type": "string", "minLength": 10, "maxLength": 10, "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["dateKey", "createdAt"]
+    },
+    "AdminUser": {
+      "title": "AdminUser",
+      "description": "Explicit administrator membership record keyed by Firebase Auth UID.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "maxLength": 160 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/site/public": {
+      "schema": { "$ref": "#/entities/SitePublicConfig" },
+      "description": "Single public configuration document holding profile details and appearance theme."
+    },
+    "/site/security": {
+      "schema": { "$ref": "#/entities/SiteSecurityConfig" },
+      "description": "Restricted admin document holding the PBKDF2-hashed secondary editing password."
+    },
+    "/links/{linkId}": {
+      "schema": { "$ref": "#/entities/SocialLink" },
+      "description": "Social links managed by the admin; active links are readable by visitors."
+    },
+    "/clickEvents/{eventId}": {
+      "schema": { "$ref": "#/entities/ClickEvent" },
+      "description": "Append-only click tracking events used for accurate per-link and daily analytics."
+    },
+    "/pageViews/{viewId}": {
+      "schema": { "$ref": "#/entities/PageViewEvent" },
+      "description": "Append-only public page view events for CTR calculation."
+    },
+    "/admins/{userId}": {
+      "schema": { "$ref": "#/entities/AdminUser" },
+      "description": "Admin role records checked by Firestore rules."
+    },
+    "/test/{docId}": {
+      "schema": { "$ref": "#/entities/SitePublicConfig" },
+      "description": "Connection healthcheck path used only for initial SDK connectivity check."
+    }
+  }
+}

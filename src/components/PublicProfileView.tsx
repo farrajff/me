@@ -17,7 +17,6 @@ import {
   type SocialLink,
 } from '../shared/types';
 import { resolveAssetUrl } from '../shared/defaultAssets';
-import { getAppMode } from '../services/dataClient';
 import { PLATFORM_MAP, SocialIcon } from './SocialIcons';
 
 interface PublicProfileViewProps {
@@ -102,9 +101,9 @@ export const PublicProfileView: React.FC<PublicProfileViewProps> = ({
     }
   };
 
-  const handleCopyShortLink = async (linkId: string) => {
-    if (await copyTextSafely(`${pageBaseUrl}/r/${linkId}`)) {
-      setCopiedId(linkId);
+  const handleCopyLinkUrl = async (link: SocialLink) => {
+    if (await copyTextSafely(link.url)) {
+      setCopiedId(link.id);
       setTimeout(() => setCopiedId(null), 1800);
     }
   };
@@ -509,10 +508,10 @@ export const PublicProfileView: React.FC<PublicProfileViewProps> = ({
                 </div>
               </div>
 
-              {links.length > 0 && getAppMode() === 'server' && (
+              {links.length > 0 && (
                 <div>
                   <p className="text-xs mb-2" style={{ color: theme.textSecondary }}>
-                    روابط التتبع المختصرة (تحسب كل نقرة بدقة)
+                    روابط حساباتك السريعة
                   </p>
                   <div className="max-h-52 overflow-y-auto space-y-2">
                     {links.map((link) => (
@@ -530,7 +529,7 @@ export const PublicProfileView: React.FC<PublicProfileViewProps> = ({
                         </div>
                         <button
                           type="button"
-                          onClick={() => handleCopyShortLink(link.id)}
+                          onClick={() => handleCopyLinkUrl(link)}
                           className="text-xs px-2.5 py-1 shrink-0 cursor-pointer"
                           style={{
                             border: `1px solid ${theme.borderColor}`,

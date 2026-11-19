@@ -1,89 +1,37 @@
+import {
+  Timestamp,
+  collection,
+  deleteDoc,
+  doc,
+  getDoc,
+  getDocs,
+  query,
+  serverTimestamp,
+  setDoc,
+  updateDoc,
+  where,
+  writeBatch,
+} from 'firebase/firestore';
+import { signInWithPopup, signOut } from 'firebase/auth';
+import { OperationType, auth, db, googleProvider, handleFirestoreError } from '../firebase';
 import { createDefaultDashboardData } from '../shared/defaultData';
 import type {
   AdminDashboardPayload,
   AppearanceSettings,
+  ClickEvent,
   ProfileData,
   PublicPayload,
   SocialLink,
   SocialPlatform,
 } from '../shared/types';
 
-const STATIC_STORE_KEY = 'rawabiti_static_store_v1';
-const STATIC_AUTH_KEY = 'rawabiti_static_auth_v1';
-const STATIC_TOKEN_PREFIX = 'static.';
-
-interface StaticAuthRecord {
-  passwordHash: string;
-  sessionSecret: string;
-}
-
-let detectedMode: 'server' | 'static' | null = null;
-
-async function isJsonOkResponse(res: Response): Promise<boolean> {
-  if (!res.ok) return false;
-  const ct = res.headers.get('content-type') || '';
-  return ct.includes('application/json');
-}
+let firestoreLinksSeeded = false;
 
 function getTodayKey(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-function loadStaticStore(): AdminDashboardPayload {
-  try {
-    const raw = localStorage.getItem(STATIC_STORE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as Partial<AdminDashboardPayload>;
-      const fallback = createDefaultDashboardData();
-      return {
-        profile: { ...fallback.profile, ...parsed.profile },
-        appearance: { ...fallback.appearance, ...parsed.appearance },
-        links: Array.isArray(parsed.links) ? parsed.links : fallback.links,
-        analytics: {
-          dailyClicks: parsed.analytics?.dailyClicks ?? {},
-          recentEvents: Array.isArray(parsed.analytics?.recentEvents)
-            ? parsed.analytics.recentEvents
-            : [],
-          totalPageViews: parsed.analytics?.totalPageViews ?? 0,
-          dailyPageViews: parsed.analytics?.dailyPageViews ?? {},
-          deviceCounts: parsed.analytics?.deviceCounts ?? { mobile: 0, desktop: 0 },
-        },
-      };
-    }
-  } catch {
-    // Fallback below
-  }
-  const initial = createDefaultDashboardData();
-  saveStaticStore(initial);
-  return initial;
-}
-
-function saveStaticStore(data: AdminDashboardPayload): void {
-  try {
-    localStorage.setItem(STATIC_STORE_KEY, JSON.stringify(data));
-  } catch {
-    // Ignore storage quota errors
-  }
-}
-
-function loadStaticAuth(): StaticAuthRecord | null {
-  try {
-    const raw = localStorage.getItem(STATIC_AUTH_KEY);
-    return raw ? (JSON.parse(raw) as StaticAuthRecord) : null;
-  } catch {
-    return null;
-  }
-}
-
-function saveStaticAuth(record: StaticAuthRecord): void {
-  try {
-    localStorage.setItem(STATIC_AUTH_KEY, JSON.stringify(record));
-  } catch {
-    // Ignore
-  }
-}
-
-function randomHex(bytesLen = 16): string {
+function randomHex(bytesLen = 8): string {
   const arr = new Uint8Array(bytesLen);
   if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
     crypto.getRandomValues(arr);
@@ -119,7 +67,6 @@ async function hashPasswordClient(password: string, existingSalt?: string): Prom
     );
     return `${salt}:${hex}`;
   }
-  // Minimal fallback for non-secure contexts
   let hash = 2166136261;
   const input = `${salt}:${password}`;
   for (let i = 0; i < input.length; i++) {
@@ -157,228 +104,399 @@ function normalizeUrlClient(rawUrl: string): string {
   return `https://${trimmed}`;
 }
 
+function isoFromFirestore(val: unknown): string {
+  if (val instanceof Timestamp) {
+    return val.toDate().toISOString();
+  }
+  if (typeof val === 'string') return val;
+  return new Date().toISOString();
+}
+
 export function getAppMode(): 'server' | 'static' {
-  return detectedMode || 'static';
+  return 'static';
+}
+
+export async function signInAdminWithGoogle(): Promise<void> {
+  await signInWithPopup(auth, googleProvider);
+}
+
+export async function signOutAdminGoogle(): Promise<void> {
+  await signOut(auth);
+}
+
+async function ensureInitialSeedInFirestore(): Promise<void> {
+  const publicRef = doc(db, 'site', 'public');
+  let snap;
+  try {
+    snap = await getDoc(publicRef);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, 'site/public');
+  }
+
+  if (snap.exists()) {
+    firestoreLinksSeeded = true;
+    return;
+  }
+
+  const defaults = createDefaultDashboardData();
+  const batch = writeBatch(db);
+
+  batch.set(publicRef, {
+    ...defaults.profile,
+    ...defaults.appearance,
+    updatedAt: serverTimestamp(),
+  });
+
+  defaults.links.forEach((link) => {
+    const linkRef = doc(db, 'links', link.id);
+    batch.set(linkRef, {
+      title: link.title,
+      subtitle: link.subtitle,
+      url: link.url,
+      platform: link.platform,
+      isActive: link.isActive,
+      featured: link.featured,
+      order: link.order,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  });
+
+  try {
+    await batch.commit();
+    firestoreLinksSeeded = true;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, 'site/public');
+  }
 }
 
 export async function fetchPublicData(trackView = false): Promise<PublicPayload> {
-  if (detectedMode !== 'static') {
-    try {
-      const url = trackView ? './api/public?trackView=1' : './api/public';
-      const res = await fetch(url);
-      if (await isJsonOkResponse(res)) {
-        detectedMode = 'server';
-        return (await res.json()) as PublicPayload;
-      }
-    } catch {
-      // Fall back to static mode
-    }
+  const defaults = createDefaultDashboardData();
+
+  let publicSnap;
+  try {
+    publicSnap = await getDoc(doc(db, 'site', 'public'));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, 'site/public');
   }
 
-  detectedMode = 'static';
-  const store = loadStaticStore();
-  if (trackView) {
-    const today = getTodayKey();
-    store.analytics.totalPageViews += 1;
-    store.analytics.dailyPageViews[today] = (store.analytics.dailyPageViews[today] || 0) + 1;
-    saveStaticStore(store);
+  if (!publicSnap.exists()) {
+    firestoreLinksSeeded = false;
+    return {
+      profile: defaults.profile,
+      appearance: defaults.appearance,
+      links: defaults.links.filter((l) => l.isActive),
+    };
   }
+
+  firestoreLinksSeeded = true;
+  const siteData = publicSnap.data();
+
+  let linksSnap;
+  try {
+    linksSnap = await getDocs(query(collection(db, 'links'), where('isActive', '==', true)));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, 'links');
+  }
+
+  const links: SocialLink[] = linksSnap.docs
+    .map((docSnap) => {
+      const d = docSnap.data();
+      return {
+        id: docSnap.id,
+        title: String(d.title || ''),
+        subtitle: String(d.subtitle || ''),
+        url: String(d.url || ''),
+        platform: (d.platform || 'website') as SocialPlatform,
+        isActive: Boolean(d.isActive),
+        featured: Boolean(d.featured),
+        order: typeof d.order === 'number' ? d.order : 0,
+        clicks: 0,
+        createdAt: isoFromFirestore(d.createdAt),
+      };
+    })
+    .sort((a, b) => a.order - b.order);
+
+  if (trackView) {
+    const viewId = `vw-${randomHex(8)}`;
+    setDoc(doc(db, 'pageViews', viewId), {
+      dateKey: getTodayKey(),
+      createdAt: serverTimestamp(),
+    }).catch((error) => {
+      console.error('PageView tracking failed:', error);
+    });
+  }
+
   return {
-    profile: store.profile,
-    appearance: store.appearance,
-    links: [...store.links].filter((l) => l.isActive).sort((a, b) => a.order - b.order),
+    profile: {
+      displayName: String(siteData.displayName ?? defaults.profile.displayName),
+      handle: String(siteData.handle ?? defaults.profile.handle),
+      bio: String(siteData.bio ?? defaults.profile.bio),
+      location: String(siteData.location ?? defaults.profile.location),
+      avatarUrl: String(siteData.avatarUrl ?? defaults.profile.avatarUrl),
+      coverUrl: String(siteData.coverUrl ?? defaults.profile.coverUrl),
+      showCover: Boolean(siteData.showCover ?? defaults.profile.showCover),
+      showQuickIcons: Boolean(siteData.showQuickIcons ?? defaults.profile.showQuickIcons),
+    },
+    appearance: {
+      theme: (siteData.theme ?? defaults.appearance.theme) as AppearanceSettings['theme'],
+      accentColor: (siteData.accentColor ??
+        defaults.appearance.accentColor) as AppearanceSettings['accentColor'],
+      cardRadius: (siteData.cardRadius ??
+        defaults.appearance.cardRadius) as AppearanceSettings['cardRadius'],
+      layout: (siteData.layout ?? defaults.appearance.layout) as AppearanceSettings['layout'],
+      iconStyle: (siteData.iconStyle ??
+        defaults.appearance.iconStyle) as AppearanceSettings['iconStyle'],
+    },
+    links,
   };
 }
 
 export function trackLinkClick(linkId: string): void {
-  if (detectedMode === 'server') {
-    const endpoint = `./api/links/${encodeURIComponent(linkId)}/click`;
-    if (typeof navigator.sendBeacon === 'function') {
-      navigator.sendBeacon(endpoint, '');
-    } else {
-      fetch(endpoint, { method: 'POST', keepalive: true }).catch(() => {});
-    }
-    return;
-  }
-
-  const store = loadStaticStore();
-  const link = store.links.find((l) => l.id === linkId && l.isActive);
-  if (!link) return;
-  const today = getTodayKey();
+  if (!firestoreLinksSeeded) return;
+  const eventId = `ev-${randomHex(8)}`;
   const isMobile = /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent || '');
   const device: 'mobile' | 'desktop' = isMobile ? 'mobile' : 'desktop';
 
-  link.clicks = (link.clicks || 0) + 1;
-  if (!store.analytics.dailyClicks[today]) store.analytics.dailyClicks[today] = {};
-  store.analytics.dailyClicks[today][link.id] =
-    (store.analytics.dailyClicks[today][link.id] || 0) + 1;
-  store.analytics.deviceCounts[device] = (store.analytics.deviceCounts[device] || 0) + 1;
-  store.analytics.recentEvents.unshift({
-    id: randomHex(8),
-    linkId: link.id,
-    timestamp: new Date().toISOString(),
+  setDoc(doc(db, 'clickEvents', eventId), {
+    linkId,
+    dateKey: getTodayKey(),
     device,
+    createdAt: serverTimestamp(),
+  }).catch((error) => {
+    console.error('Click tracking failed:', error);
   });
-  if (store.analytics.recentEvents.length > 150) {
-    store.analytics.recentEvents = store.analytics.recentEvents.slice(0, 150);
-  }
-  saveStaticStore(store);
 }
 
-export async function fetchAuthStatus(
-  token: string,
-): Promise<{ isConfigured: boolean; authenticated: boolean }> {
-  if (detectedMode !== 'static') {
-    try {
-      const res = await fetch('./api/auth/status', {
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      });
-      if (await isJsonOkResponse(res)) {
-        detectedMode = 'server';
-        return (await res.json()) as { isConfigured: boolean; authenticated: boolean };
-      }
-    } catch {
-      // Fall back to static mode
-    }
+export async function fetchPasswordConfigured(): Promise<boolean> {
+  try {
+    const snap = await getDoc(doc(db, 'site', 'security'));
+    return snap.exists() && typeof snap.data()?.passwordHash === 'string';
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, 'site/security');
   }
-
-  detectedMode = 'static';
-  const auth = loadStaticAuth();
-  const isConfigured = Boolean(auth?.passwordHash);
-  const authenticated = Boolean(
-    isConfigured && auth && token === `${STATIC_TOKEN_PREFIX}${auth.sessionSecret}`,
-  );
-  return { isConfigured, authenticated };
 }
 
 export async function setupPassword(password: string): Promise<string> {
-  if (detectedMode === 'server') {
-    const res = await fetch('./api/auth/setup', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password }),
-    });
-    const body = (await res.json()) as { token?: string; error?: string };
-    if (!res.ok || !body.token) {
-      throw new Error(body.error || 'تعذر حفظ كلمة المرور.');
-    }
-    return body.token;
+  await ensureInitialSeedInFirestore();
+  const secRef = doc(db, 'site', 'security');
+  let existingSnap;
+  try {
+    existingSnap = await getDoc(secRef);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, 'site/security');
   }
 
-  const existing = loadStaticAuth();
-  if (existing?.passwordHash) {
+  if (existingSnap.exists() && existingSnap.data()?.passwordHash) {
     throw new Error('تم تعيين كلمة المرور مسبقاً.');
   }
+
   const passwordHash = await hashPasswordClient(password);
-  const sessionSecret = randomHex(16);
-  saveStaticAuth({ passwordHash, sessionSecret });
-  return `${STATIC_TOKEN_PREFIX}${sessionSecret}`;
+  try {
+    await setDoc(secRef, {
+      passwordHash,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, 'site/security');
+  }
+  return `fb-${randomHex(12)}`;
 }
 
 export async function loginWithPassword(password: string): Promise<string> {
-  if (detectedMode === 'server') {
-    const res = await fetch('./api/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password }),
-    });
-    const body = (await res.json()) as { token?: string; error?: string };
-    if (!res.ok || !body.token) {
-      throw new Error(body.error || 'كلمة المرور غير صحيحة.');
-    }
-    return body.token;
+  await ensureInitialSeedInFirestore();
+  let secSnap;
+  try {
+    secSnap = await getDoc(doc(db, 'site', 'security'));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, 'site/security');
   }
 
-  const auth = loadStaticAuth();
-  if (!auth?.passwordHash) {
+  const storedHash = secSnap.exists() ? String(secSnap.data()?.passwordHash || '') : '';
+  if (!storedHash) {
     throw new Error('يرجى إعداد كلمة مرور جديدة أولاً.');
   }
-  const valid = await verifyPasswordClient(password, auth.passwordHash);
+  const valid = await verifyPasswordClient(password, storedHash);
   if (!valid) {
     throw new Error('كلمة المرور غير صحيحة.');
   }
-  return `${STATIC_TOKEN_PREFIX}${auth.sessionSecret}`;
+  return `fb-${randomHex(12)}`;
 }
 
 export async function changePassword(
-  token: string,
+  _token: string,
   currentPassword: string,
   newPassword: string,
 ): Promise<string> {
-  if (detectedMode === 'server') {
-    const res = await fetch('./api/auth/change-password', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({ currentPassword, newPassword }),
-    });
-    const body = (await res.json()) as { token?: string; error?: string };
-    if (!res.ok || !body.token) {
-      throw new Error(body.error || 'تعذر تحديث كلمة المرور.');
-    }
-    return body.token;
+  const secRef = doc(db, 'site', 'security');
+  let secSnap;
+  try {
+    secSnap = await getDoc(secRef);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, 'site/security');
   }
-
-  const auth = loadStaticAuth();
-  if (!auth?.passwordHash || !(await verifyPasswordClient(currentPassword, auth.passwordHash))) {
+  const storedHash = secSnap.exists() ? String(secSnap.data()?.passwordHash || '') : '';
+  if (!storedHash || !(await verifyPasswordClient(currentPassword, storedHash))) {
     throw new Error('كلمة المرور الحالية غير صحيحة.');
   }
+
   const passwordHash = await hashPasswordClient(newPassword);
-  const sessionSecret = randomHex(16);
-  saveStaticAuth({ passwordHash, sessionSecret });
-  return `${STATIC_TOKEN_PREFIX}${sessionSecret}`;
+  try {
+    await updateDoc(secRef, {
+      passwordHash,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, 'site/security');
+  }
+  return `fb-${randomHex(12)}`;
 }
 
-export async function fetchAdminDashboard(token: string): Promise<AdminDashboardPayload> {
-  if (detectedMode === 'server') {
-    const res = await fetch('./api/admin/dashboard', {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (res.status === 401) throw new Error('UNAUTHORIZED');
-    if (!res.ok) throw new Error('تعذر تحميل بيانات لوحة التحكم.');
-    return (await res.json()) as AdminDashboardPayload;
+export async function fetchAdminDashboard(_token: string): Promise<AdminDashboardPayload> {
+  await ensureInitialSeedInFirestore();
+  const defaults = createDefaultDashboardData();
+
+  let siteSnap;
+  try {
+    siteSnap = await getDoc(doc(db, 'site', 'public'));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, 'site/public');
   }
 
-  const store = loadStaticStore();
+  let linksSnap;
+  try {
+    linksSnap = await getDocs(collection(db, 'links'));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, 'links');
+  }
+
+  let clicksSnap;
+  try {
+    clicksSnap = await getDocs(collection(db, 'clickEvents'));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, 'clickEvents');
+  }
+
+  let viewsSnap;
+  try {
+    viewsSnap = await getDocs(collection(db, 'pageViews'));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, 'pageViews');
+  }
+
+  const clickCountByLink: Record<string, number> = {};
+  const dailyClicks: Record<string, Record<string, number>> = {};
+  const deviceCounts = { mobile: 0, desktop: 0 };
+  const recentEvents: ClickEvent[] = [];
+
+  clicksSnap.docs.forEach((docSnap) => {
+    const d = docSnap.data();
+    const linkId = String(d.linkId || '');
+    const dateKey = String(d.dateKey || getTodayKey());
+    const device = d.device === 'mobile' ? 'mobile' : 'desktop';
+    const timestamp = isoFromFirestore(d.createdAt);
+
+    clickCountByLink[linkId] = (clickCountByLink[linkId] || 0) + 1;
+    if (!dailyClicks[dateKey]) dailyClicks[dateKey] = {};
+    dailyClicks[dateKey][linkId] = (dailyClicks[dateKey][linkId] || 0) + 1;
+    deviceCounts[device] += 1;
+    recentEvents.push({
+      id: docSnap.id,
+      linkId,
+      timestamp,
+      device,
+    });
+  });
+
+  recentEvents.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
+
+  const dailyPageViews: Record<string, number> = {};
+  viewsSnap.docs.forEach((docSnap) => {
+    const dateKey = String(docSnap.data()?.dateKey || getTodayKey());
+    dailyPageViews[dateKey] = (dailyPageViews[dateKey] || 0) + 1;
+  });
+
+  const links: SocialLink[] = linksSnap.docs
+    .map((docSnap) => {
+      const d = docSnap.data();
+      return {
+        id: docSnap.id,
+        title: String(d.title || ''),
+        subtitle: String(d.subtitle || ''),
+        url: String(d.url || ''),
+        platform: (d.platform || 'website') as SocialPlatform,
+        isActive: Boolean(d.isActive),
+        featured: Boolean(d.featured),
+        order: typeof d.order === 'number' ? d.order : 0,
+        clicks: clickCountByLink[docSnap.id] || 0,
+        createdAt: isoFromFirestore(d.createdAt),
+      };
+    })
+    .sort((a, b) => a.order - b.order);
+
+  const siteData = siteSnap.exists() ? siteSnap.data() : {};
+
   return {
-    ...store,
-    links: [...store.links].sort((a, b) => a.order - b.order),
+    profile: {
+      displayName: String(siteData.displayName ?? defaults.profile.displayName),
+      handle: String(siteData.handle ?? defaults.profile.handle),
+      bio: String(siteData.bio ?? defaults.profile.bio),
+      location: String(siteData.location ?? defaults.profile.location),
+      avatarUrl: String(siteData.avatarUrl ?? defaults.profile.avatarUrl),
+      coverUrl: String(siteData.coverUrl ?? defaults.profile.coverUrl),
+      showCover: Boolean(siteData.showCover ?? defaults.profile.showCover),
+      showQuickIcons: Boolean(siteData.showQuickIcons ?? defaults.profile.showQuickIcons),
+    },
+    appearance: {
+      theme: (siteData.theme ?? defaults.appearance.theme) as AppearanceSettings['theme'],
+      accentColor: (siteData.accentColor ??
+        defaults.appearance.accentColor) as AppearanceSettings['accentColor'],
+      cardRadius: (siteData.cardRadius ??
+        defaults.appearance.cardRadius) as AppearanceSettings['cardRadius'],
+      layout: (siteData.layout ?? defaults.appearance.layout) as AppearanceSettings['layout'],
+      iconStyle: (siteData.iconStyle ??
+        defaults.appearance.iconStyle) as AppearanceSettings['iconStyle'],
+    },
+    links,
+    analytics: {
+      dailyClicks,
+      recentEvents: recentEvents.slice(0, 150),
+      totalPageViews: viewsSnap.size,
+      dailyPageViews,
+      deviceCounts,
+    },
   };
 }
 
 export async function saveProfileAndAppearance(
-  token: string,
+  _token: string,
   profile: ProfileData,
   appearance: AppearanceSettings,
 ): Promise<void> {
-  if (detectedMode === 'server') {
-    const headers = {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
-    };
-    const [pRes, aRes] = await Promise.all([
-      fetch('./api/admin/profile', { method: 'PUT', headers, body: JSON.stringify(profile) }),
-      fetch('./api/admin/appearance', {
-        method: 'PUT',
-        headers,
-        body: JSON.stringify(appearance),
-      }),
-    ]);
-    if (pRes.status === 401 || aRes.status === 401) throw new Error('UNAUTHORIZED');
-    if (!pRes.ok || !aRes.ok) throw new Error('تعذر حفظ التغييرات.');
-    return;
+  try {
+    await setDoc(doc(db, 'site', 'public'), {
+      displayName: profile.displayName.trim().slice(0, 80),
+      handle: profile.handle.trim().slice(0, 60),
+      bio: profile.bio.trim().slice(0, 260),
+      location: profile.location.trim().slice(0, 80),
+      avatarUrl: profile.avatarUrl.trim().slice(0, 150000),
+      coverUrl: profile.coverUrl.trim().slice(0, 350000),
+      showCover: Boolean(profile.showCover),
+      showQuickIcons: Boolean(profile.showQuickIcons),
+      theme: appearance.theme,
+      accentColor: appearance.accentColor,
+      cardRadius: appearance.cardRadius,
+      layout: appearance.layout,
+      iconStyle: appearance.iconStyle,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, 'site/public');
   }
-
-  const store = loadStaticStore();
-  store.profile = profile;
-  store.appearance = appearance;
-  saveStaticStore(store);
 }
 
 export async function saveLinkItem(
-  token: string,
+  _token: string,
   linkId: string | null,
   payload: {
     platform: SocialPlatform;
@@ -388,143 +506,103 @@ export async function saveLinkItem(
     featured: boolean;
   },
 ): Promise<void> {
-  if (detectedMode === 'server') {
-    const url = linkId ? `./api/admin/links/${linkId}` : './api/admin/links';
-    const method = linkId ? 'PUT' : 'POST';
-    const res = await fetch(url, {
-      method,
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify(payload),
-    });
-    if (res.status === 401) throw new Error('UNAUTHORIZED');
-    if (!res.ok) {
-      const body = (await res.json().catch(() => ({}))) as { error?: string };
-      throw new Error(body.error || 'تعذر حفظ الرابط.');
+  const normalizedUrl = normalizeUrlClient(payload.url).slice(0, 512);
+  if (linkId) {
+    try {
+      await updateDoc(doc(db, 'links', linkId), {
+        platform: payload.platform,
+        title: payload.title.trim().slice(0, 80),
+        subtitle: payload.subtitle.trim().slice(0, 120),
+        url: normalizedUrl,
+        featured: Boolean(payload.featured),
+        updatedAt: serverTimestamp(),
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `links/${linkId}`);
     }
     return;
   }
 
-  const store = loadStaticStore();
-  const normalized = normalizeUrlClient(payload.url);
-  if (linkId) {
-    const target = store.links.find((l) => l.id === linkId);
-    if (target) {
-      target.platform = payload.platform;
-      target.title = payload.title;
-      target.subtitle = payload.subtitle;
-      target.url = normalized;
-      target.featured = payload.featured;
-    }
-  } else {
-    const maxOrder = store.links.reduce((max, item) => Math.max(max, item.order), -1);
-    store.links.push({
-      id: `lnk-${randomHex(4)}`,
-      platform: payload.platform,
-      title: payload.title,
-      subtitle: payload.subtitle,
-      url: normalized,
-      isActive: true,
-      featured: payload.featured,
-      order: maxOrder + 1,
-      clicks: 0,
-      createdAt: new Date().toISOString(),
-    });
+  let existingSnap;
+  try {
+    existingSnap = await getDocs(collection(db, 'links'));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, 'links');
   }
-  saveStaticStore(store);
+  const maxOrder = existingSnap.docs.reduce((max, d) => {
+    const ord = d.data()?.order;
+    return typeof ord === 'number' ? Math.max(max, ord) : max;
+  }, -1);
+
+  const newId = `lnk-${randomHex(4)}`;
+  try {
+    await setDoc(doc(db, 'links', newId), {
+      platform: payload.platform,
+      title: payload.title.trim().slice(0, 80),
+      subtitle: payload.subtitle.trim().slice(0, 120),
+      url: normalizedUrl,
+      isActive: true,
+      featured: Boolean(payload.featured),
+      order: maxOrder + 1,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, `links/${newId}`);
+  }
 }
 
 export async function patchLinkItem(
-  token: string,
+  _token: string,
   linkId: string,
   patch: Partial<Pick<SocialLink, 'isActive' | 'featured'>>,
 ): Promise<void> {
-  if (detectedMode === 'server') {
-    const res = await fetch(`./api/admin/links/${linkId}`, {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify(patch),
+  try {
+    await updateDoc(doc(db, 'links', linkId), {
+      ...patch,
+      updatedAt: serverTimestamp(),
     });
-    if (res.status === 401) throw new Error('UNAUTHORIZED');
-    return;
-  }
-
-  const store = loadStaticStore();
-  const target = store.links.find((l) => l.id === linkId);
-  if (target) {
-    Object.assign(target, patch);
-    saveStaticStore(store);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `links/${linkId}`);
   }
 }
 
-export async function reorderLinkItems(token: string, orderedIds: string[]): Promise<void> {
-  if (detectedMode === 'server') {
-    const res = await fetch('./api/admin/links-order', {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({ orderedIds }),
+export async function reorderLinkItems(_token: string, orderedIds: string[]): Promise<void> {
+  const batch = writeBatch(db);
+  orderedIds.forEach((id, idx) => {
+    batch.update(doc(db, 'links', id), {
+      order: idx,
+      updatedAt: serverTimestamp(),
     });
-    if (res.status === 401) throw new Error('UNAUTHORIZED');
-    return;
-  }
-
-  const store = loadStaticStore();
-  const orderMap = new Map<string, number>();
-  orderedIds.forEach((id, idx) => orderMap.set(id, idx));
-  store.links.forEach((l) => {
-    const ord = orderMap.get(l.id);
-    if (typeof ord === 'number') l.order = ord;
   });
-  store.links.sort((a, b) => a.order - b.order);
-  saveStaticStore(store);
+  try {
+    await batch.commit();
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, 'links');
+  }
 }
 
-export async function deleteLinkItem(token: string, linkId: string): Promise<void> {
-  if (detectedMode === 'server') {
-    const res = await fetch(`./api/admin/links/${linkId}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (res.status === 401) throw new Error('UNAUTHORIZED');
-    return;
+export async function deleteLinkItem(_token: string, linkId: string): Promise<void> {
+  try {
+    await deleteDoc(doc(db, 'links', linkId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `links/${linkId}`);
   }
-
-  const store = loadStaticStore();
-  store.links = store.links
-    .filter((l) => l.id !== linkId)
-    .sort((a, b) => a.order - b.order)
-    .map((l, idx) => ({ ...l, order: idx }));
-  saveStaticStore(store);
 }
 
-export async function resetAnalyticsData(token: string): Promise<void> {
-  if (detectedMode === 'server') {
-    const res = await fetch('./api/admin/analytics/reset', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (res.status === 401) throw new Error('UNAUTHORIZED');
-    return;
+export async function resetAnalyticsData(_token: string): Promise<void> {
+  try {
+    const [clicksSnap, viewsSnap] = await Promise.all([
+      getDocs(collection(db, 'clickEvents')),
+      getDocs(collection(db, 'pageViews')),
+    ]);
+    const allRefs = [...clicksSnap.docs.map((d) => d.ref), ...viewsSnap.docs.map((d) => d.ref)];
+    for (let i = 0; i < allRefs.length; i += 400) {
+      const batch = writeBatch(db);
+      allRefs.slice(i, i + 400).forEach((ref) => batch.delete(ref));
+      await batch.commit();
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, 'clickEvents');
   }
-
-  const store = loadStaticStore();
-  store.links.forEach((l) => {
-    l.clicks = 0;
-  });
-  store.analytics = {
-    dailyClicks: {},
-    recentEvents: [],
-    totalPageViews: 0,
-    dailyPageViews: {},
-    deviceCounts: { mobile: 0, desktop: 0 },
-  };
-  saveStaticStore(store);
 }
